@@ -1,0 +1,33 @@
+{
+  "name": "moshi-notify-omp",
+  "version": "1.0.0",
+  "description": "Oh My Pi extension that bridges agent lifecycle events to the Moshi API for iOS push notifications and Live Activity updates",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jefflewis/moshi-notify-omp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jefflewis/moshi-notify-omp/issues"
+  },
+  "homepage": "https://github.com/jefflewis/moshi-notify-omp#readme",
+  "keywords": [
+    "moshi",
+    "oh-my-pi",
+    "omp",
+    "ios",
+    "notifications",
+    "live-activity",
+    "agent",
+    "extension"
+  ],
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "src/extension.ts",
+  "engines": {
+    "bun": ">=1.0.0"
+  }
+}
