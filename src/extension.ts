@@ -138,28 +138,38 @@ function summarizeToolInput(
 		return "";
 	}
 
-	if (toolName === "bash") return pick("command", "cmd").slice(0, 200);
-	if (toolName === "read") return pick("file_path", "filePath", "path", "file").slice(0, 200);
-	if (toolName === "edit" || toolName === "write")
-		return pick("file_path", "filePath", "path", "file").slice(0, 200);
-	if (toolName === "search" || toolName === "grep")
-		return pick("query", "pattern", "q").slice(0, 200);
-	if (toolName === "find" || toolName === "glob")
-		return pick("pattern", "query", "path").slice(0, 200);
-	if (toolName === "web_fetch") return pick("url", "uri").slice(0, 200);
-	if (toolName === "web_search") return pick("query", "q", "url").slice(0, 200);
-	if (toolName === "task")
-		return pick("description", "prompt", "task").slice(0, 200);
-	if (toolName === "ast_edit")
-		return pick("file_path", "filePath", "path", "file").slice(0, 200);
-	if (toolName === "notebook")
-		return pick("notebook_path", "notebookPath", "path").slice(0, 200);
-	if (toolName === "ask")
-		return pick("question", "message", "q").slice(0, 200);
-	if (toolName === "todo_write") return "Updating task list";
-	return "";
+	switch (toolName) {
+		case "bash":
+			return pick("command", "cmd").slice(0, 200);
+		case "read":
+			return pick("file_path", "filePath", "path", "file").slice(0, 200);
+		case "edit":
+		case "write":
+			return pick("file_path", "filePath", "path", "file").slice(0, 200);
+		case "search":
+		case "grep":
+			return pick("query", "pattern", "q").slice(0, 200);
+		case "find":
+		case "glob":
+			return pick("pattern", "query", "path").slice(0, 200);
+		case "web_fetch":
+			return pick("url", "uri").slice(0, 200);
+		case "web_search":
+			return pick("query", "q", "url").slice(0, 200);
+		case "task":
+			return pick("description", "prompt", "task").slice(0, 200);
+		case "ast_edit":
+			return pick("file_path", "filePath", "path", "file").slice(0, 200);
+		case "notebook":
+			return pick("notebook_path", "notebookPath", "path").slice(0, 200);
+		case "ask":
+			return pick("question", "message", "q").slice(0, 200);
+		case "todo_write":
+			return "Updating task list";
+		default:
+			return "";
+	}
 }
-
 // ---------------------------------------------------------------------------
 // Todo state extraction
 // ---------------------------------------------------------------------------
@@ -276,27 +286,32 @@ function buildCompletionMessage(state: SessionState, contextPercent?: number): s
 		parts.push(truncate(state.lastMessage, 200));
 	}
 
-	if (state.lastToolName) {
 		const detail = state.lastToolSummary || "";
-		const verb =
-			state.lastToolName === "edit" || state.lastToolName === "write" || state.lastToolName === "ast_edit"
-				? "Updated"
-				: state.lastToolName === "read"
-					? "Read"
-					: state.lastToolName === "bash"
-						? "Ran"
-						: state.lastToolName === "search" || state.lastToolName === "grep" || state.lastToolName === "find" || state.lastToolName === "glob"
-							? "Searched"
-							: state.lastToolName === "web_fetch"
-								? "Fetched"
-								: state.lastToolName === "web_search"
-									? "Searched"
-									: state.lastToolName === "task"
-										? "Delegated"
-										: "Used";
-		const target = detail ? ` ${detail}` : "";
-		parts.push(`${verb}${target}`);
-	}
+		const verb = (() => {
+			switch (state.lastToolName) {
+				case "edit":
+				case "write":
+				case "ast_edit":
+					return "Updated";
+				case "read":
+					return "Read";
+				case "bash":
+					return "Ran";
+				case "search":
+				case "grep":
+				case "find":
+				case "glob":
+					return "Searched";
+				case "web_fetch":
+					return "Fetched";
+				case "web_search":
+					return "Searched";
+				case "task":
+					return "Delegated";
+				default:
+					return "Used";
+			}
+		})();
 
 	if (!parts.length) {
 		parts.push(`Turn ${state.turnCount} complete`);
