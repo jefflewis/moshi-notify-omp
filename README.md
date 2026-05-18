@@ -10,13 +10,11 @@ Oh My Pi  →  moshi-notify-omp  →  Moshi API  →  APNs  →  Live Activity
 
 Requires [Bun](https://bun.sh) (>= 1.0.0).
 
-1. Clone into your Oh My Pi extensions directory:
+1. Copy into your Oh My Pi extensions directory:
 
 ```bash
-git clone https://github.com/jefflewis/moshi-notify-omp.git \
-  ~/.omp/agent/extensions/moshi-notify-omp
-ln -s ~/.omp/agent/extensions/moshi-notify-omp/src/extension.ts \
-  ~/.omp/agent/extensions/moshi-notify.ts
+git clone https://github.com/jefflewis/moshi-notify-omp.git ~/Developer/moshi-notify-omp
+cp ~/Developer/moshi-notify-omp/src/extension.ts ~/.omp/agent/extensions/moshi-notify.ts
 ```
 
 2. Set your Moshi API token:
@@ -30,19 +28,19 @@ echo "YOUR_TOKEN" > ~/.config/moshi/token
 
 ## How it works
 
+Only todo updates and critical messages are sent — everything else is silent.
+
 | Event | When it fires | Title example |
 |---|---|---|
-| `agent_start` | New session begins | `rev-market:agent · Agent Started` |
-| `turn_end` | Assistant finishes a turn **and** needs attention (question, approval, error) | `rev-market:agent · Reply Ready` |
 | `tool_call` / `tool_result` | Only for `todo_write` | `Implementation · 2/7` |
+| `turn_end` | Assistant is asking for user input (question/approval) | `rev-market:agent · Waiting for Reply` |
 | `auto_retry_start` | Agent retries after an error | `rev-market:agent · Retrying` |
-| `agent_end` | Session ends | `rev-market:agent · All Done` |
 
 ### Noise reduction
 
-- **No "Thinking" pings** — removed `turn_start` notifications entirely.
+- **No start/end pings** — `agent_start` and `agent_end` are not sent.
 - **No tool spam** — `bash`, `read`, `edit`, etc. are silent. Only `todo_write` updates the Live Activity.
-- **Filtered turn ends** — only notifies when the assistant asks a question, requests approval, or reports an error/warning/blocker.
+- **Tight question filter** — `turn_end` only notifies when the assistant is genuinely asking for input (explicit questions, approval phrases), not when it mentions "error" or "warning" in passing.
 
 ### Tmux context
 
