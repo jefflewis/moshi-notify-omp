@@ -4,13 +4,13 @@
  * Bridges Oh My Pi lifecycle events to the Moshi API for iOS push
  * notifications and Live Activity updates.
  *
+ * Quiet mode: only todo_write updates and critical messages are pushed.
+ *
  * Events mapped:
- *   agent_start       → notification / info                    (visible push)
- *   turn_end          → stop / task_complete                   (visible push, filtered)
- *   tool_call         → pre_tool / tool_running                (silent Live Activity, todo only)
- *   tool_result       → post_tool / tool_finished              (silent Live Activity, todo only)
- *   auto_retry_start  → notification / error                   (visible push)
- *   agent_end         → stop / task_complete                   (visible push)
+ *   tool_call         → pre_tool / tool_running    (todo_write only)
+ *   tool_result       → post_tool / tool_finished  (todo_write only)
+ *   turn_end          → notification / approval    (only when assistant asks a question)
+ *   auto_retry_start  → notification / error       (visible push)
  */
 
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -23,19 +23,16 @@ import { basename } from "path";
 
 const TOKEN_PATH = `${homedir()}/.config/moshi/token`;
 const API_URL = "https://api.getmoshi.app/api/v1/agent-events";
-const STOP_COOLDOWN_MS = 5_000;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 type EventType =
-	| "user_prompt"
 	| "pre_tool"
 	| "post_tool"
 	| "notification"
-	| "stop"
-	| "agent_turn_complete";
+	| "stop";
 
 type Category =
 	| "approval_required"
@@ -58,14 +55,6 @@ interface AgentEvent {
 	toolName?: string;
 	contextPercent?: number;
 	host?: string;
-}
-
-interface SessionState {
-	modelName?: string;
-	lastToolName?: string;
-	lastToolSummary?: string;
-	lastMessage?: string;
-	turnCount: number;
 }
 
 interface TodoPhase {
@@ -124,52 +113,6 @@ function truncate(value: string | undefined, max = 240): string {
 	return `${text.slice(0, max - 1)}...`;
 }
 
-function summarizeToolInput(
-	toolName: string,
-	input: Record<string, unknown> | undefined,
-): string {
-	if (!input) return "";
-
-	function pick(...keys: string[]): string {
-		for (const key of keys) {
-			const v = input[key];
-			if (v != null) return String(v);
-		}
-		return "";
-	}
-
-	switch (toolName) {
-		case "bash":
-			return pick("command", "cmd").slice(0, 200);
-		case "read":
-			return pick("file_path", "filePath", "path", "file").slice(0, 200);
-		case "edit":
-		case "write":
-			return pick("file_path", "filePath", "path", "file").slice(0, 200);
-		case "search":
-		case "grep":
-			return pick("query", "pattern", "q").slice(0, 200);
-		case "find":
-		case "glob":
-			return pick("pattern", "query", "path").slice(0, 200);
-		case "web_fetch":
-			return pick("url", "uri").slice(0, 200);
-		case "web_search":
-			return pick("query", "q", "url").slice(0, 200);
-		case "task":
-			return pick("description", "prompt", "task").slice(0, 200);
-		case "ast_edit":
-			return pick("file_path", "filePath", "path", "file").slice(0, 200);
-		case "notebook":
-			return pick("notebook_path", "notebookPath", "path").slice(0, 200);
-		case "ask":
-			return pick("question", "message", "q").slice(0, 200);
-		case "todo_write":
-			return "Updating task list";
-		default:
-			return "";
-	}
-}
 // ---------------------------------------------------------------------------
 // Todo state extraction
 // ---------------------------------------------------------------------------
@@ -198,6 +141,7 @@ function extractTodoState(result: unknown): { currentTask: string; phase: string
 	}
 
 	const lastPhase = phases[phases.length - 1];
+	if (!lastPhase) return null;
 	const total = lastPhase.tasks.length;
 	const done = lastPhase.tasks.filter((t) => t.status === "completed").length;
 	if (done === total && total > 0) {
@@ -212,35 +156,24 @@ function extractTodoState(result: unknown): { currentTask: string; phase: string
 }
 
 // ---------------------------------------------------------------------------
-// Noteworthy filter
+// Question detection
 // ---------------------------------------------------------------------------
 
-function isNoteworthyMessage(message: string): boolean {
-	const lower = message.toLowerCase();
+function isAskingForInput(message: string): boolean {
+	const normalized = message.trim().replace(/\s+/g, " ");
+	if (!normalized) return false;
 
-	if (message.includes("?")) return true;
+	// Explicit approval / confirmation phrases
+	if (/^(may|can|should|shall) i\b/i.test(normalized)) return true;
+	if (/^(would|do) you (like|want) me to\b/i.test(normalized)) return true;
+	if (/^(which|what|where|when|who|how)\b/i.test(normalized) && normalized.endsWith("?")) return true;
+	if (/please (confirm|approve|verify)/i.test(normalized)) return true;
+	if (/want me to proceed/i.test(normalized)) return true;
+	if (/need your (input|approval|confirmation)/i.test(normalized)) return true;
 
-	const approvalPhrases = [
-		"should i", "shall i", "may i", "can i", "do you want me to",
-		"would you like", "is it okay", "is that okay", "are you okay",
-		"approve", "confirmation", "confirm", "let me know if",
-		"what do you think", "your thoughts", "your preference",
-		"want me to proceed", "okay to", "alright to", "proceed with",
-		"go ahead", "need your input", "need your approval",
-		"how would you like", "which would you prefer",
-	];
-	if (approvalPhrases.some((p) => lower.includes(p))) return true;
-
-	const noticePhrases = [
-		"error", "failed", "failure", "critical", "warning", "issue",
-		"problem", "blocked", "stuck", "unable to", "could not",
-		"did not", "unexpected", "exception", "timeout", "refused",
-		"not found", "missing", "requires attention", "needs attention",
-		"important notice", "breaking change", "incident",
-	];
-	if (noticePhrases.some((p) => lower.includes(p))) return true;
-
-	return false;
+	// Short trailing question (assistant genuinely asking something)
+	const lastSentence = normalized.split(/[.!]\s+/).pop() ?? "";
+	return lastSentence.endsWith("?") && lastSentence.length <= 200;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +198,7 @@ function getTmuxContext(): string | undefined {
 			return text || undefined;
 		}
 	} catch {
-		// tmux not available or command failed
+		// tmux not available
 	}
 
 	cachedTmuxContext = "";
@@ -279,69 +212,13 @@ function buildTitle(base: string, tmuxContext?: string): string {
 	return parts.join(" · ");
 }
 
-function buildCompletionMessage(state: SessionState, contextPercent?: number): string {
-	const parts: string[] = [];
-
-	if (state.lastMessage) {
-		parts.push(truncate(state.lastMessage, 200));
-	}
-
-		const detail = state.lastToolSummary || "";
-		const verb = (() => {
-			switch (state.lastToolName) {
-				case "edit":
-				case "write":
-				case "ast_edit":
-					return "Updated";
-				case "read":
-					return "Read";
-				case "bash":
-					return "Ran";
-				case "search":
-				case "grep":
-				case "find":
-				case "glob":
-					return "Searched";
-				case "web_fetch":
-					return "Fetched";
-				case "web_search":
-					return "Searched";
-				case "task":
-					return "Delegated";
-				default:
-					return "Used";
-			}
-		})();
-
-	if (!parts.length) {
-		parts.push(`Turn ${state.turnCount} complete`);
-	}
-
-	if (contextPercent != null && contextPercent >= 80) {
-		parts.push(`Context at ${contextPercent}%`);
-	}
-
-	return parts.join(" · ");
-}
-
 // ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
 export default function moshiNotify(pi: ExtensionAPI) {
 	let token: string | null = null;
-	let lastStopTime = 0;
-
-	const sessionStates = new Map<string, SessionState>();
-
-	function getState(sessionId: string): SessionState {
-		let state = sessionStates.get(sessionId);
-		if (!state) {
-			state = { turnCount: 0 };
-			sessionStates.set(sessionId, state);
-		}
-		return state;
-	}
+	let lastAssistantMessage = "";
 
 	async function getToken(): Promise<string | null> {
 		if (token) return token;
@@ -414,30 +291,9 @@ export default function moshiNotify(pi: ExtensionAPI) {
 		await sendEvent(t, event);
 	}
 
-	// --- Agent start → visible push with model info --------------------------
+	// --- Capture assistant messages for question detection -------------------
 
-	pi.on("agent_start", async (_event, ctx) => {
-		const state = getState(ctx.sessionManager.getSessionId());
-		state.turnCount = 0;
-		state.lastToolName = undefined;
-		state.lastToolSummary = undefined;
-		state.lastMessage = undefined;
-
-		const model = typeof ctx.model === "string" ? ctx.model : ctx.model?.id ?? ctx.model?.name;
-		if (model) state.modelName = model;
-
-		await dispatch(
-			ctx,
-			"notification",
-			"info",
-			buildTitle("Agent Started", getTmuxContext()),
-			`Working in ${basename(ctx.cwd)}`,
-		);
-	});
-
-	// --- Capture assistant messages for richer completion messages -----------
-
-	pi.on("message_end", async (event, ctx) => {
+	pi.on("message_end", async (event, _ctx) => {
 		const msg = event.message as { role?: string; content?: Array<{ type: string; text?: string }> | string } | undefined;
 		if (!msg || msg.role !== "assistant") return;
 
@@ -451,83 +307,50 @@ export default function moshiNotify(pi: ExtensionAPI) {
 				.join(" ");
 		}
 
-		if (text.trim()) {
-			const state = getState(ctx.sessionManager.getSessionId());
-			state.lastMessage = text.trim();
-		}
+		lastAssistantMessage = text.trim();
 	});
 
-	// --- Turn end → visible push notification (filtered) ---------------------
+	// --- Turn end → only when assistant is asking for input -----------------
 
 	pi.on("turn_end", async (_event, ctx) => {
-		const now = Date.now();
-		if (now - lastStopTime < STOP_COOLDOWN_MS) return;
-		lastStopTime = now;
-
-		const sessionId = ctx.sessionManager.getSessionId();
-		const state = getState(sessionId);
-		const contextPercent = ctx.getContextUsage?.()?.percent ?? undefined;
-
-		// Only notify on turn end when something needs attention:
-		// the assistant asked a question, requested approval, or flagged an issue.
-		if (!state.lastMessage || !isNoteworthyMessage(state.lastMessage)) {
-			state.lastToolName = undefined;
-			state.lastToolSummary = undefined;
-			state.lastMessage = undefined;
+		if (!lastAssistantMessage || !isAskingForInput(lastAssistantMessage)) {
+			lastAssistantMessage = "";
 			return;
-		}
-
-		let titleBase: string;
-		if (state.lastToolName) {
-			titleBase = `Done · ${state.lastToolName}`;
-		} else if (state.lastMessage) {
-			titleBase = "Reply Ready";
-		} else {
-			titleBase = `Turn ${state.turnCount} done`;
 		}
 
 		await dispatch(
 			ctx,
-			"stop",
-			"task_complete",
-			buildTitle(titleBase, getTmuxContext()),
-			buildCompletionMessage(state, contextPercent ?? undefined),
+			"notification",
+			"approval_required",
+			buildTitle("Waiting for Reply", getTmuxContext()),
+			truncate(lastAssistantMessage, 240),
 		);
 
-		state.lastToolName = undefined;
-		state.lastToolSummary = undefined;
-		state.lastMessage = undefined;
+		lastAssistantMessage = "";
 	});
 
-	// --- Tool call → silent Live Activity (todo only) -----------------------
+	// --- Tool call → todo_write only ----------------------------------------
 
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName !== "todo_write") return;
-
-		const summary = summarizeToolInput(event.toolName, event.input);
-		const state = getState(ctx.sessionManager.getSessionId());
-		state.lastToolName = event.toolName;
-		state.lastToolSummary = summary;
 
 		await dispatch(
 			ctx,
 			"pre_tool",
 			"tool_running",
 			buildTitle("Updating tasks", getTmuxContext()),
-			summary,
+			"Updating task list",
 			event.toolName,
 		);
 	});
 
-	// --- Tool result → silent Live Activity (todo only) ---------------------
+	// --- Tool result → todo_write only --------------------------------------
 
 	pi.on("tool_result", async (event, ctx) => {
 		if (event.toolName !== "todo_write") return;
 
-		const state = getState(ctx.sessionManager.getSessionId());
-
 		if (event.isError) {
-			const result = event.result as { content?: Array<{ type: string; text?: string }>; details?: unknown } | undefined;
+			const result = event.result as { content?: Array<{ type: string; text?: string }> } | undefined;
 			const errorText = result?.content?.find((c) => c.type === "text")?.text ?? "Error updating tasks";
 			await dispatch(
 				ctx,
@@ -556,7 +379,6 @@ export default function moshiNotify(pi: ExtensionAPI) {
 	// --- Auto retry → visible push ------------------------------------------
 
 	pi.on("auto_retry_start", async (event, ctx) => {
-		const state = getState(ctx.sessionManager.getSessionId());
 		const attemptMsg = event.attempt > 1 ? ` (attempt ${event.attempt}/${event.maxAttempts})` : "";
 		await dispatch(
 			ctx,
@@ -565,32 +387,5 @@ export default function moshiNotify(pi: ExtensionAPI) {
 			buildTitle("Retrying", getTmuxContext()),
 			`The agent is retrying after an error${attemptMsg}`,
 		);
-	});
-
-	// --- Agent end → visible push with summary ------------------------------
-
-	pi.on("agent_end", async (_event, ctx) => {
-		const sessionId = ctx.sessionManager.getSessionId();
-		const state = getState(sessionId);
-		const contextPercent = ctx.getContextUsage?.()?.percent ?? undefined;
-
-		let titleBase: string;
-		if (state.lastToolName) {
-			titleBase = `Finished · ${state.lastToolName}`;
-		} else if (state.lastMessage) {
-			titleBase = "All Done";
-		} else {
-			titleBase = "Finished";
-		}
-
-		await dispatch(
-			ctx,
-			"stop",
-			"task_complete",
-			buildTitle(titleBase, getTmuxContext()),
-			buildCompletionMessage(state, contextPercent ?? undefined),
-		);
-
-		sessionStates.delete(sessionId);
 	});
 }
